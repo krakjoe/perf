@@ -32,10 +32,8 @@
 #include "php_perf.h"
 
 typedef struct _php_perf_el_t {
-    zend_string *filename;
-    zend_string *scope;
-    zend_string *function;
-    zend_long    lineno;
+    zend_function  function;
+    zend_op        opline;
 } php_perf_el_t;
 
 typedef struct _php_perf_globals_t {
@@ -84,16 +82,13 @@ static void* php_perf_routine(void *pg) {
             break;
         }
 
-        /* safe to write element, be fast, 
-            file, function, and (I think) class names are interned and persistent (do not copy) 
-            may be an internal function call (check func->type) */
-        el.filename = peg->frame->func->op_array.filename;
-        el.lineno   = peg->frame->opline->lineno;
-
-        zend_hash_next_index_insert_mem(
-            perf, &el, sizeof(php_perf_el_t));
+        el.function = *peg->frame->func;
+        el.opline   = *peg->frame->opline;
 
         php_perf_monitor_set(peg->monitor, PHP_PERF_DONE, 1);
+        
+        zend_hash_next_index_insert_mem(
+            perf, &el, sizeof(php_perf_el_t));
     }
     
     php_perf_monitor_set(peg->monitor, PHP_PERF_DONE, 1);
@@ -109,15 +104,15 @@ PHP_MINIT_FUNCTION(perf)
     char *interval = getenv("PHP_PERF_INTERVAL");
     
     if (interval) {
-        /* check if positive interval and within ms range */
         php_perf_interval = 
             zend_atoi(interval, strlen(interval));
-        
-        /* only set if sensible interval */    
-        php_perf_enabled = 1;
-        
-        zend_interrupt_callback = zend_interrupt_function;
-        zend_interrupt_function = php_perf_interrupt;
+            
+        if (php_perf_interval > 0) {
+            php_perf_enabled = 1;
+            
+            zend_interrupt_callback = zend_interrupt_function;
+            zend_interrupt_function = php_perf_interrupt;
+        }
     }
     
     return SUCCESS;
@@ -147,8 +142,6 @@ static int php_perf_startup() {
     }
     
     ts.tv_sec = 0;
-    /* take interval in microseconds, 
-        nano seconds are not useful to humans */
     ts.tv_nsec = php_perf_interval * 1000;
     
     its.it_interval = ts;
@@ -197,11 +190,14 @@ static void php_perf_process(HashTable *perf) {
 
     php_printf("got %d frames\n", zend_hash_num_elements(perf));
     
-    /*
     ZEND_HASH_FOREACH_NUM_KEY_PTR(perf, idx, el) {
-        do something with traces, write callgrind, I dunno
+        php_printf("%s:%d %s\n", 
+            el->function.common.function_name ? 
+                ZSTR_VAL(el->function.common.function_name) : 
+                "main()", 
+            el->opline.lineno, 
+            zend_get_opcode_name(el->opline.opcode));
     } ZEND_HASH_FOREACH_END();
-    */
 
     zend_hash_destroy(perf);
     free(perf);
